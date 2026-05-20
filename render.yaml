@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: comment-dashboard
+    env: docker
+    plan: starter
+    autoDeploy: false
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 8787
+      - key: DASHBOARD_PASSWORD
+        sync: false

@@ -1,0 +1,15 @@
+services:
+  comment-dashboard:
+    build: .
+    container_name: comment-dashboard
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+    volumes:
+      - ./outputs:/app/outputs
+      - ./profiles/bilibili:/app/.bilibili-profile
+      - ./profiles/xhs:/app/.xhs-profile

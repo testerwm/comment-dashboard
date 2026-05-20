@@ -1,0 +1,8 @@
+.bilibili-profile/
+.xhs-profile/
+.tmp/
+__pycache__/
+*.pyc
+.DS_Store
+outputs/
+samples/

@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>评论数据爬取与报告</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">CL</span>
+        <div>
+          <strong>Comment Lab</strong>
+          <small>爬取、导入、分析</small>
+        </div>
+      </div>
+      <nav>
+        <button class="nav-button active" data-view="crawl">爬取</button>
+        <button class="nav-button" data-view="import">导入</button>
+        <button class="nav-button" data-view="dashboard">表盘</button>
+        <button class="nav-button" data-view="report">报告</button>
+        <button class="nav-button" data-view="json">JSON</button>
+      </nav>
+      <div class="source-panel">
+        <span>当前数据</span>
+        <strong id="sourceName">未加载</strong>
+        <small id="sourceMeta">等待爬取或导入 JSON</small>
+      </div>
+    </aside>
+
+    <main>
+      <section class="topbar">
+        <div>
+          <h1>热门视频评论分析</h1>
+          <p>支持 Bilibili、小红书结果，也会尽量归一化其他平台的相似 JSON。</p>
+        </div>
+        <div class="top-actions">
+          <button id="refreshOutputs" class="secondary">刷新文件</button>
+          <button id="downloadNormalized" class="secondary">导出归一化 JSON</button>
+        </div>
+      </section>
+
+      <section id="crawl" class="view active">
+        <div class="split">
+          <form id="crawlForm" class="panel">
+            <div class="panel-title">
+              <h2>爬取配置</h2>
+              <span>变量可直接修改</span>
+            </div>
+            <label>
+              平台
+              <select name="platform" id="platformSelect">
+                <option value="bilibili">Bilibili</option>
+                <option value="xhs">小红书</option>
+              </select>
+            </label>
+            <label>
+              关键词
+              <input name="keyword" placeholder="输入要搜索的关键词" />
+            </label>
+            <div class="grid two bili-only">
+              <label>
+                热门视频数量
+                <input name="videoCount" type="number" min="1" max="50" value="10" />
+              </label>
+            </div>
+            <div class="grid two xhs-only hidden">
+              <label>
+                帖子数量
+                <input name="limit" type="number" min="1" max="50" value="10" />
+              </label>
+            </div>
+            <details class="filter-box">
+              <summary>高级筛选</summary>
+              <div class="grid two bili-only">
+                <label>
+                  B 站排序
+                  <select name="biliOrder">
+                    <option value="totalrank">综合排序</option>
+                    <option value="click">最多播放</option>
+                    <option value="pubdate">最新发布</option>
+                    <option value="dm">最多弹幕</option>
+                    <option value="stow">最多收藏</option>
+                  </select>
+                </label>
+                <label>
+                  B 站时长
+                  <select name="biliDuration">
+                    <option value="0">全部时长</option>
+                    <option value="1">10 分钟以下</option>
+                    <option value="2">10-30 分钟</option>
+                    <option value="3">30-60 分钟</option>
+                    <option value="4">60 分钟以上</option>
+                  </select>
+                </label>
+              </div>
+              <div class="grid two xhs-only hidden">
+                <label>
+                  小红书类型
+                  <select name="xhsContentType">
+                    <option value="all">全部</option>
+                    <option value="image">图文</option>
+                    <option value="video">视频</option>
+                  </select>
+                </label>
+                <label>
+                  小红书排序
+                  <select name="xhsSort">
+                    <option value="general">综合</option>
+                    <option value="latest">最新</option>
+                    <option value="most_liked">最多点赞</option>
+                    <option value="most_commented">最多评论</option>
+                    <option value="most_collected">最多收藏</option>
+                  </select>
+                </label>
+              </div>
+            </details>
+            <div class="grid two">
+              <label>
+                <span id="commentCountLabel">每视频热门评论数</span>
+                <input name="commentCount" type="number" min="1" max="200" value="20" />
+              </label>
+              <label>
+                每条热门评论最多回复
+                <input name="maxRepliesPerComment" type="number" min="0" max="50" value="10" />
+              </label>
+            </div>
+            <label class="checkline">
+              <input name="headless" type="checkbox" />
+              后台模式（不显示浏览器窗口）
+            </label>
+            <input name="biliScriptPath" type="hidden" />
+            <input name="xhsScriptPath" type="hidden" />
+            <label>
+              登录浏览器 Profile
+              <input name="profileDir" />
+            </label>
+            <label>
+              输出 JSON 路径或文件名
+              <input name="outputFile" placeholder="留空则自动保存到 outputs/" />
+            </label>
+            <div class="form-actions">
+              <button type="submit">开始爬取</button>
+              <button id="stopJob" type="button" class="danger" disabled>停止当前任务</button>
+              <button id="startBiliLogin" type="button" class="secondary bili-only">打开 B 站登录窗口</button>
+              <button id="startXhsLogin" type="button" class="secondary xhs-only hidden">打开小红书登录窗口</button>
+              <button id="finishLogin" type="button" class="secondary" disabled>保存登录状态</button>
+            </div>
+            <p class="form-note">登录窗口不会自动关闭。请在平台页面完成登录后，回到这里点击“保存登录状态”。</p>
+          </form>
+
+          <div class="panel logs-panel">
+            <div class="panel-title">
+              <h2>运行日志</h2>
+              <span id="jobStatus">空闲</span>
+            </div>
+            <pre id="jobLogs">等待任务启动...</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="import" class="view">
+        <div class="import-layout">
+          <div class="panel import-card">
+            <div class="panel-title">
+              <h2>本地导入</h2>
+              <span>选择一个 JSON 文件</span>
+            </div>
+            <label>
+              本地 JSON
+              <input id="fileInput" type="file" accept="application/json,.json" />
+            </label>
+            <p class="form-note">支持 Bilibili、小红书结果，也会尝试识别其他平台的相似字段。</p>
+          </div>
+
+          <div class="panel import-card">
+            <div class="panel-title">
+              <h2>结果文件</h2>
+              <button id="refreshImportFiles" class="secondary" type="button">刷新</button>
+            </div>
+            <div class="file-toolbar">
+              <label class="checkline">
+                <input id="selectAllFiles" type="checkbox" />
+                全选
+              </label>
+              <span id="fileCount">0 个文件</span>
+            </div>
+            <div id="outputFiles" class="file-list"></div>
+            <div id="selectedFileInfo" class="file-info">暂无结果文件</div>
+            <div class="form-actions import-actions">
+              <button id="loadSelectedFile" type="button">加载到表盘</button>
+              <button id="deleteSelectedFile" class="danger" type="button">删除文件</button>
+              <button id="deleteCheckedFiles" class="danger" type="button">批量删除</button>
+            </div>
+          </div>
+
+          <div class="panel import-card">
+            <div class="panel-title">
+              <h2>当前数据</h2>
+              <span id="formatBadge">未识别</span>
+            </div>
+            <div id="schemaInfo" class="schema-info">导入后会显示平台、条目数和评论字段。</div>
+            <div class="form-actions import-actions">
+              <button id="downloadRaw" type="button" class="secondary">导出原始 JSON</button>
+              <button id="downloadNormalizedImport" type="button" class="secondary">导出归一化 JSON</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="dashboard" class="view">
+        <div class="dataset-summary" id="datasetSummary"></div>
+        <div class="dashboard-grid">
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2>帖子/视频明细</h2>
+              <span>点击条目查看评论与回复</span>
+            </div>
+            <div class="item-workbench">
+              <div id="itemList" class="item-list"></div>
+              <div class="item-detail">
+                <div id="itemDetailHeader" class="item-detail-header"></div>
+                <div id="itemComments" class="thread-list"></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2>互动排行</h2>
+              <span>按抓取到的评论与回复排序</span>
+            </div>
+            <div id="itemsChart" class="bar-chart"></div>
+          </div>
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2>所有帖子高赞回答</h2>
+              <span>按点赞排序</span>
+            </div>
+            <div id="topComments" class="comment-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="report" class="view">
+        <div class="panel report-panel">
+          <div class="panel-title">
+            <h2>理解展示报告</h2>
+            <button id="copyReport" class="secondary">复制报告</button>
+          </div>
+          <article id="insightReport"></article>
+        </div>
+      </section>
+
+      <section id="json" class="view">
+        <div class="panel">
+          <div class="panel-title">
+            <h2>原始 JSON</h2>
+            <span id="jsonSize">0 KB</span>
+          </div>
+          <pre id="jsonPreview" class="json-preview">暂无数据</pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
