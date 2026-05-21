@@ -1,5 +1,10 @@
 .bilibili-profile/
 .xhs-profile/
+profiles/
+.env
+venv/
+.venv/
+.idea/
 .tmp/
 __pycache__/
 *.pyc

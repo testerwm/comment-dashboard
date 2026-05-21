@@ -9,7 +9,6 @@ http://127.0.0.1:8787
 ## 启动
 
 ```bash
-cd /Users/king/Documents/Codex/2026-05-20/comment-dashboard
 python3 server.py
 ```
 
@@ -98,6 +97,12 @@ DASHBOARD_PASSWORD=你的访问密码
 如果爬虫运行时报缺少依赖，请在对应环境安装：
 
 ```bash
-pip install -r requirements-crawlers.txt
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements-crawlers.txt
 python -m playwright install chromium
+
+python3 server.py
 ```

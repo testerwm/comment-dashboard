@@ -132,9 +132,6 @@ def python_for_script(script_path: Path) -> str:
     alt_python = script_path.parent / "venv" / "bin" / "python"
     if alt_python.exists():
         return str(alt_python)
-    shared_playwright_python = Path("/Users/king/Documents/Codex/2026-05-20/redbook/.venv/bin/python")
-    if script_path.name in {"bilibili_browser_crawler.py", "xhs_comments_spider.py"} and shared_playwright_python.exists():
-        return str(shared_playwright_python)
     return sys.executable
 
 
