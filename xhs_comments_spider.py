@@ -89,6 +89,44 @@ def note_id_from_url(url: str) -> str:
     return re.sub(r"\W+", "_", url)[-80:]
 
 
+def first_value(data: dict[str, Any], keys: list[str], default: Any = "") -> Any:
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def comment_from_api(data: dict[str, Any], fallback_id: str = "") -> Comment:
+    user = data.get("user_info") or data.get("user") or {}
+    author = first_value(user, ["nickname", "name", "user_name"])
+    content = first_value(data, ["content", "text", "desc"])
+    like_count = parse_count(str(first_value(data, ["like_count", "likes", "liked_count"], 0)))
+    create_time = first_value(data, ["create_time", "time", "time_text"])
+    time_text = str(create_time or "")
+    location = str(first_value(data, ["ip_location", "location"], ""))
+    comment_id = str(first_value(data, ["id", "comment_id", "rpid"], fallback_id))
+    return Comment(
+        comment_id=comment_id or fallback_id,
+        author=str(author or ""),
+        content=str(content or ""),
+        like_count=like_count,
+        time_text=time_text,
+        location=location,
+        raw_text=json.dumps(data, ensure_ascii=False)[:2000],
+    )
+
+
 async def human_pause(min_seconds: float = 0.6, max_seconds: float = 1.6) -> None:
     await asyncio.sleep(random.uniform(min_seconds, max_seconds))
 
@@ -452,28 +490,10 @@ async def collect_posts(page: Page, limit: int, keyword: str) -> list[Post]:
 
 
 async def open_post_from_search(page: Page, post: Post) -> None:
-    target = post.url.split("?")[0]
-    cards = page.locator("section.note-item, div.note-item, [class*='note-item']")
-    count = await cards.count()
-    for index in range(count):
-        card = cards.nth(index)
-        try:
-            link = card.locator("a[href*='/explore/'], a[href*='/discovery/item/']").first
-            href = await link.get_attribute("href", timeout=1000)
-            if not href:
-                continue
-            if href.startswith("/"):
-                href = BASE_URL + href
-            if href.split("?")[0] != target:
-                continue
-            await card.click(timeout=5000)
-            await wait_for_optional_network_idle(page, timeout=8000)
-            await human_pause(1.2, 2.2)
-            post.url = page.url
-            return
-        except Exception:
-            continue
-    raise RuntimeError(f"搜索页中找不到帖子卡片：{post.title or target}")
+    await page.goto(post.url, wait_until="domcontentloaded")
+    await wait_for_optional_network_idle(page, timeout=8000)
+    await human_pause(1.2, 2.2)
+    post.url = page.url
 
 
 async def extract_comment_from_item(item: Locator) -> Comment | None:
@@ -634,6 +654,162 @@ async def scrape_comments(page: Page, hot_comment_count: int, max_replies_per_co
     return hot_comments
 
 
+async def xhs_api_get(page: Page, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    return await page.evaluate(
+        """
+        async ({ path, params }) => {
+          const url = new URL(path, location.origin);
+          Object.entries(params || {}).forEach(([key, value]) => {
+            if (value !== undefined && value !== null && value !== "") {
+              url.searchParams.set(key, String(value));
+            }
+          });
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 15000);
+          try {
+            const res = await fetch(url.toString(), {
+              method: "GET",
+              credentials: "include",
+              headers: {
+                "accept": "application/json, text/plain, */*",
+                "x-requested-with": "XMLHttpRequest"
+              },
+              signal: controller.signal
+            });
+            const text = await res.text();
+            let body = null;
+            try { body = JSON.parse(text); } catch (_) {}
+            return { ok: res.ok, status: res.status, body, text: body ? "" : text.slice(0, 500) };
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        """,
+        {"path": path, "params": params},
+    )
+
+
+def xhs_api_items(body: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data")
+    if isinstance(data, dict):
+        for key in ("comments", "comment_list", "list", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    for key in ("comments", "comment_list", "list", "items"):
+        value = body.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def xhs_api_cursor(body: dict[str, Any] | None) -> tuple[str, bool]:
+    if not isinstance(body, dict):
+        return "", False
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    cursor = str(first_value(data, ["cursor", "next_cursor"], ""))
+    has_more = as_bool(first_value(data, ["has_more", "hasMore"], False))
+    return cursor, has_more
+
+
+async def fetch_api_replies(page: Page, note_id: str, root_comment_id: str, max_replies: int) -> list[Comment]:
+    if max_replies <= 0 or not root_comment_id:
+        return []
+    replies_by_id: dict[str, Comment] = {}
+    cursor = ""
+    rounds = 0
+    while len(replies_by_id) < max_replies and rounds < 8:
+        rounds += 1
+        result = await xhs_api_get(
+            page,
+            "/api/sns/web/v2/comment/sub/page",
+            {
+                "note_id": note_id,
+                "root_comment_id": root_comment_id,
+                "cursor": cursor,
+                "num": min(20, max_replies),
+                "image_formats": "jpg,webp,avif",
+            },
+        )
+        if not result.get("ok"):
+            break
+        body = result.get("body")
+        items = xhs_api_items(body)
+        if not items:
+            break
+        for index, item in enumerate(items):
+            reply = comment_from_api(item, f"{root_comment_id}-reply-{rounds}-{index}")
+            if reply.content and reply.comment_id not in replies_by_id:
+                replies_by_id[reply.comment_id] = reply
+            if len(replies_by_id) >= max_replies:
+                break
+        cursor, has_more = xhs_api_cursor(body)
+        if not has_more or not cursor:
+            break
+        await human_pause(0.3, 0.8)
+    return list(replies_by_id.values())[:max_replies]
+
+
+async def scrape_comments_via_api(page: Page, note_id: str, hot_comment_count: int, max_replies_per_comment: int) -> list[Comment]:
+    comments_by_id: dict[str, Comment] = {}
+    cursor = ""
+    rounds = 0
+    target = max(hot_comment_count, 1)
+    max_rounds = max(3, min(30, (target // 10) + 5))
+
+    while len(comments_by_id) < target and rounds < max_rounds:
+        rounds += 1
+        result = await xhs_api_get(
+            page,
+            "/api/sns/web/v2/comment/page",
+            {
+                "note_id": note_id,
+                "cursor": cursor,
+                "top_comment_id": "",
+                "image_formats": "jpg,webp,avif",
+            },
+        )
+        if not result.get("ok"):
+            raise RuntimeError(f"评论接口请求失败：HTTP {result.get('status')}")
+        body = result.get("body")
+        items = xhs_api_items(body)
+        if not items:
+            raise RuntimeError("评论接口没有返回评论列表")
+        for index, item in enumerate(items):
+            comment = comment_from_api(item, f"{note_id}-comment-{rounds}-{index}")
+            sub_comments = item.get("sub_comments")
+            if isinstance(sub_comments, list):
+                for reply_index, reply_item in enumerate(sub_comments[:max_replies_per_comment]):
+                    if isinstance(reply_item, dict):
+                        reply = comment_from_api(reply_item, f"{comment.comment_id}-inline-{reply_index}")
+                        if reply.content:
+                            comment.replies.append(reply)
+            if comment.content and comment.comment_id not in comments_by_id:
+                comments_by_id[comment.comment_id] = comment
+            if len(comments_by_id) >= target:
+                break
+        cursor, has_more = xhs_api_cursor(body)
+        print(f"  [API评论] 扫描第 {rounds} 轮，主评论 {len(comments_by_id)}/{target}", flush=True)
+        if not has_more or not cursor:
+            break
+        await human_pause(0.5, 1.0)
+
+    hot_comments = sorted(comments_by_id.values(), key=lambda c: c.like_count, reverse=True)[:hot_comment_count]
+    for comment in hot_comments:
+        if len(comment.replies) < max_replies_per_comment:
+            extras = await fetch_api_replies(
+                page,
+                note_id,
+                comment.comment_id,
+                max_replies_per_comment - len(comment.replies),
+            )
+            seen = {reply.comment_id for reply in comment.replies}
+            comment.replies.extend([reply for reply in extras if reply.comment_id not in seen])
+    return hot_comments
+
+
 async def scrape_open_post(page: Page, post: Post, keyword: str, hot_comment_count: int, max_replies_per_comment: int) -> Post:
     main = page.locator(
         ".note-content, .note-detail, [class*='note-content'], [class*='note-detail'], [class*='interaction-container']"
@@ -663,7 +839,12 @@ async def scrape_open_post(page: Page, post: Post, keyword: str, hot_comment_cou
     if not keyword_matches(detail_text, keyword):
         raise RuntimeError(f"详情页内容不包含关键词：{keyword}")
 
-    comments = await scrape_comments(page, hot_comment_count, max_replies_per_comment)
+    try:
+        comments = await scrape_comments_via_api(page, post.note_id, hot_comment_count, max_replies_per_comment)
+        print(f"  [API评论] 成功抓取主评论 {len(comments)} 条", flush=True)
+    except Exception as exc:
+        print(f"  [API评论] 失败，回退 GUI 抓取：{type(exc).__name__}: {exc}", flush=True)
+        comments = await scrape_comments(page, hot_comment_count, max_replies_per_comment)
     reply_count = sum(len(comment.replies) for comment in comments)
     post.comments = comments
     post.comments_count = len(comments)
@@ -674,12 +855,30 @@ async def scrape_open_post(page: Page, post: Post, keyword: str, hot_comment_cou
     return post
 
 
-def save_output(keyword: str, output: Path, posts: list[Post], hot_comment_count: int, max_replies_per_comment: int, content_type: str, sort: str) -> None:
+def candidate_limit_for(target: int) -> int:
+    return max(target, min(target * 3, target + 80))
+
+
+def save_output(
+    keyword: str,
+    output: Path,
+    posts: list[Post],
+    hot_comment_count: int,
+    max_replies_per_comment: int,
+    content_type: str,
+    sort: str,
+    requested_posts: int | None = None,
+    failed_posts: list[Post] | None = None,
+) -> None:
+    failed_posts = failed_posts or []
     data: dict[str, Any] = {
         "platform": "xhs",
         "keyword": keyword,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "requested_posts": requested_posts if requested_posts is not None else len(posts),
         "total_posts": len(posts),
+        "successful_posts": len(posts),
+        "failed_count": len(failed_posts),
         "comment_mode": "hot",
         "hot_comments_per_post": hot_comment_count,
         "max_replies_per_comment": max_replies_per_comment,
@@ -688,6 +887,7 @@ def save_output(keyword: str, output: Path, posts: list[Post], hot_comment_count
             "sort": sort,
         },
         "posts": [asdict(p) for p in posts],
+        "failed_posts": [asdict(p) for p in failed_posts],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -705,7 +905,9 @@ async def run(keyword: str, limit: int, output: Path, profile_dir: Path, headles
         try:
             page = await context.new_page()
             await open_search(page, keyword, content_type, sort)
-            posts = await collect_posts(page, limit, keyword)
+            candidate_limit = candidate_limit_for(limit)
+            print(f"[搜索] 目标成功帖子 {limit} 个，将最多收集 {candidate_limit} 个候选用于失败补位", flush=True)
+            posts = await collect_posts(page, candidate_limit, keyword)
             if not posts:
                 raise RuntimeError(
                     "没有抓到帖子。可能是未登录、搜索页被安全验证限制，或当前筛选条件下没有结果。"
@@ -713,16 +915,32 @@ async def run(keyword: str, limit: int, output: Path, profile_dir: Path, headles
                 )
 
             scraped: list[Post] = []
+            failed_posts: list[Post] = []
             for index, post in enumerate(posts, start=1):
-                print(f"[{index}/{len(posts)}] 抓取：{post.title} | {post.url}")
+                if len(scraped) >= limit:
+                    break
+                print(f"[{index}/{len(posts)}] 抓取候选，成功 {len(scraped)}/{limit}：{post.title} | {post.url}")
                 try:
                     await open_post_from_search(page, post)
-                    scraped.append(await scrape_open_post(page, post, keyword, hot_comment_count, max_replies_per_comment))
+                    scraped_post = await scrape_open_post(page, post, keyword, hot_comment_count, max_replies_per_comment)
+                    scraped.append(scraped_post)
+                    print(f"  [成功] 已完成帖子 {len(scraped)}/{limit}", flush=True)
                 except Exception as exc:
                     post.scrape_error = f"{type(exc).__name__}: {exc}"
+                    failed_posts.append(post)
                     print(f"  跳过该帖子，原因：{post.scrape_error}")
-                if scraped:
-                    save_output(keyword, output, scraped, hot_comment_count, max_replies_per_comment, content_type, sort)
+                if scraped or failed_posts:
+                    save_output(
+                        keyword,
+                        output,
+                        scraped,
+                        hot_comment_count,
+                        max_replies_per_comment,
+                        content_type,
+                        sort,
+                        requested_posts=limit,
+                        failed_posts=failed_posts,
+                    )
                 try:
                     await page.go_back(wait_until="domcontentloaded", timeout=10000)
                     await wait_for_optional_network_idle(page, timeout=5000)
@@ -733,7 +951,23 @@ async def run(keyword: str, limit: int, output: Path, profile_dir: Path, headles
 
             if not scraped:
                 raise RuntimeError("帖子详情均未成功抓取，未生成有效评论结果。")
-            save_output(keyword, output, scraped, hot_comment_count, max_replies_per_comment, content_type, sort)
+            if len(scraped) < limit:
+                print(
+                    f"[完成] 目标 {limit} 个成功帖子，实际成功 {len(scraped)} 个；"
+                    f"候选已用完或搜索结果不足，失败 {len(failed_posts)} 个。",
+                    flush=True,
+                )
+            save_output(
+                keyword,
+                output,
+                scraped,
+                hot_comment_count,
+                max_replies_per_comment,
+                content_type,
+                sort,
+                requested_posts=limit,
+                failed_posts=failed_posts,
+            )
             print(f"已保存：{output.resolve()}")
         finally:
             await context.close()
