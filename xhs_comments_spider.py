@@ -89,42 +89,8 @@ def note_id_from_url(url: str) -> str:
     return re.sub(r"\W+", "_", url)[-80:]
 
 
-def first_value(data: dict[str, Any], keys: list[str], default: Any = "") -> Any:
-    for key in keys:
-        value = data.get(key)
-        if value not in (None, ""):
-            return value
-    return default
-
-
-def as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y"}
-    return bool(value)
-
-
-def comment_from_api(data: dict[str, Any], fallback_id: str = "") -> Comment:
-    user = data.get("user_info") or data.get("user") or {}
-    author = first_value(user, ["nickname", "name", "user_name"])
-    content = first_value(data, ["content", "text", "desc"])
-    like_count = parse_count(str(first_value(data, ["like_count", "likes", "liked_count"], 0)))
-    create_time = first_value(data, ["create_time", "time", "time_text"])
-    time_text = str(create_time or "")
-    location = str(first_value(data, ["ip_location", "location"], ""))
-    comment_id = str(first_value(data, ["id", "comment_id", "rpid"], fallback_id))
-    return Comment(
-        comment_id=comment_id or fallback_id,
-        author=str(author or ""),
-        content=str(content or ""),
-        like_count=like_count,
-        time_text=time_text,
-        location=location,
-        raw_text=json.dumps(data, ensure_ascii=False)[:2000],
-    )
+def compact_preview(text: str, limit: int = 120) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:limit]
 
 
 async def human_pause(min_seconds: float = 0.6, max_seconds: float = 1.6) -> None:
@@ -453,11 +419,6 @@ async def collect_posts(page: Page, limit: int, keyword: str) -> list[Post]:
                     preview_text = (await card.inner_text(timeout=1000)).strip()
                 except Exception:
                     preview_text = title
-                if not keyword_matches(f"{title}\n{preview_text}", keyword):
-                    filtered_count += 1
-                    if filtered_count <= 5:
-                        print(f"  [过滤] 卡片不含关键词，跳过：{title or preview_text[:30]}", flush=True)
-                    continue
                 author = await first_text(card, [".author", ".name", ".user-name"])
                 like_text = await first_text(card, [".like-wrapper", ".count", ".likes", "span:has-text('赞')"])
                 note_type = "video" if await card.locator("svg, .play-icon, .video-icon, [class*='play']").count() else ""
@@ -494,6 +455,88 @@ async def open_post_from_search(page: Page, post: Post) -> None:
     await wait_for_optional_network_idle(page, timeout=8000)
     await human_pause(1.2, 2.2)
     post.url = page.url
+
+
+async def post_from_card(card: Locator, rank: int) -> Post | None:
+    link = card.locator("a[href*='/explore/'], a[href*='/discovery/item/']").first
+    href = await link.get_attribute("href", timeout=1000)
+    if not href:
+        return None
+    if href.startswith("/"):
+        href = BASE_URL + href
+    if "/explore/" not in href and "/discovery/item/" not in href:
+        return None
+    dedupe_url = href.split("?")[0]
+    title = await first_text(card, [".title", ".note-title", "[class*='title']", "a"])
+    try:
+        preview_text = (await card.inner_text(timeout=1000)).strip()
+    except Exception:
+        preview_text = title
+    author = await first_text(card, [".author", ".name", ".user-name"])
+    like_text = await first_text(card, [".like-wrapper", ".count", ".likes", "span:has-text('赞')"])
+    note_type = "video" if await card.locator("svg, .play-icon, .video-icon, [class*='play']").count() else ""
+    return Post(
+        rank=rank,
+        note_id=note_id_from_url(dedupe_url),
+        url=dedupe_url,
+        title=title,
+        preview_text=preview_text,
+        author=author,
+        like_count=parse_count(like_text),
+        note_type=note_type,
+    )
+
+
+async def click_post_card(page: Page, card: Locator, post: Post) -> None:
+    before_url = page.url
+    try:
+        link = card.locator("a[href*='/explore/'], a[href*='/discovery/item/']").first
+        await link.click(timeout=5000)
+    except Exception:
+        await card.click(timeout=5000)
+    await wait_for_optional_network_idle(page, timeout=8000)
+    await human_pause(1.2, 2.2)
+    if page.url != before_url:
+        post.url = page.url
+
+
+async def close_open_post(page: Page, search_url: str, keyword: str, content_type: str, sort: str) -> None:
+    close_selectors = [
+        "[aria-label*='关闭']",
+        "[aria-label*='close' i]",
+        "button:has-text('关闭')",
+        ".close",
+        "[class*='close']",
+    ]
+    for selector in close_selectors:
+        try:
+            loc = page.locator(selector)
+            for index in range(min(await loc.count(), 5)):
+                candidate = loc.nth(index)
+                if await candidate.is_visible(timeout=500):
+                    await candidate.click(timeout=1500)
+                    await human_pause(0.8, 1.3)
+                    return
+        except Exception:
+            continue
+    try:
+        await page.keyboard.press("Escape")
+        await human_pause(0.8, 1.3)
+        if "/search_result" in page.url:
+            return
+    except Exception:
+        pass
+    if "/search_result" not in page.url:
+        try:
+            await page.go_back(wait_until="domcontentloaded", timeout=10000)
+            await wait_for_optional_network_idle(page, timeout=5000)
+            await human_pause(0.8, 1.5)
+            if "/search_result" in page.url:
+                return
+        except Exception:
+            pass
+    if "/search_result" not in page.url:
+        await open_search(page, keyword, content_type, sort)
 
 
 async def extract_comment_from_item(item: Locator) -> Comment | None:
@@ -654,163 +697,7 @@ async def scrape_comments(page: Page, hot_comment_count: int, max_replies_per_co
     return hot_comments
 
 
-async def xhs_api_get(page: Page, path: str, params: dict[str, Any]) -> dict[str, Any]:
-    return await page.evaluate(
-        """
-        async ({ path, params }) => {
-          const url = new URL(path, location.origin);
-          Object.entries(params || {}).forEach(([key, value]) => {
-            if (value !== undefined && value !== null && value !== "") {
-              url.searchParams.set(key, String(value));
-            }
-          });
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 15000);
-          try {
-            const res = await fetch(url.toString(), {
-              method: "GET",
-              credentials: "include",
-              headers: {
-                "accept": "application/json, text/plain, */*",
-                "x-requested-with": "XMLHttpRequest"
-              },
-              signal: controller.signal
-            });
-            const text = await res.text();
-            let body = null;
-            try { body = JSON.parse(text); } catch (_) {}
-            return { ok: res.ok, status: res.status, body, text: body ? "" : text.slice(0, 500) };
-          } finally {
-            clearTimeout(timer);
-          }
-        }
-        """,
-        {"path": path, "params": params},
-    )
-
-
-def xhs_api_items(body: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not isinstance(body, dict):
-        return []
-    data = body.get("data")
-    if isinstance(data, dict):
-        for key in ("comments", "comment_list", "list", "items"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-    for key in ("comments", "comment_list", "list", "items"):
-        value = body.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def xhs_api_cursor(body: dict[str, Any] | None) -> tuple[str, bool]:
-    if not isinstance(body, dict):
-        return "", False
-    data = body.get("data") if isinstance(body.get("data"), dict) else body
-    cursor = str(first_value(data, ["cursor", "next_cursor"], ""))
-    has_more = as_bool(first_value(data, ["has_more", "hasMore"], False))
-    return cursor, has_more
-
-
-async def fetch_api_replies(page: Page, note_id: str, root_comment_id: str, max_replies: int) -> list[Comment]:
-    if max_replies <= 0 or not root_comment_id:
-        return []
-    replies_by_id: dict[str, Comment] = {}
-    cursor = ""
-    rounds = 0
-    while len(replies_by_id) < max_replies and rounds < 8:
-        rounds += 1
-        result = await xhs_api_get(
-            page,
-            "/api/sns/web/v2/comment/sub/page",
-            {
-                "note_id": note_id,
-                "root_comment_id": root_comment_id,
-                "cursor": cursor,
-                "num": min(20, max_replies),
-                "image_formats": "jpg,webp,avif",
-            },
-        )
-        if not result.get("ok"):
-            break
-        body = result.get("body")
-        items = xhs_api_items(body)
-        if not items:
-            break
-        for index, item in enumerate(items):
-            reply = comment_from_api(item, f"{root_comment_id}-reply-{rounds}-{index}")
-            if reply.content and reply.comment_id not in replies_by_id:
-                replies_by_id[reply.comment_id] = reply
-            if len(replies_by_id) >= max_replies:
-                break
-        cursor, has_more = xhs_api_cursor(body)
-        if not has_more or not cursor:
-            break
-        await human_pause(0.3, 0.8)
-    return list(replies_by_id.values())[:max_replies]
-
-
-async def scrape_comments_via_api(page: Page, note_id: str, hot_comment_count: int, max_replies_per_comment: int) -> list[Comment]:
-    comments_by_id: dict[str, Comment] = {}
-    cursor = ""
-    rounds = 0
-    target = max(hot_comment_count, 1)
-    max_rounds = max(3, min(30, (target // 10) + 5))
-
-    while len(comments_by_id) < target and rounds < max_rounds:
-        rounds += 1
-        result = await xhs_api_get(
-            page,
-            "/api/sns/web/v2/comment/page",
-            {
-                "note_id": note_id,
-                "cursor": cursor,
-                "top_comment_id": "",
-                "image_formats": "jpg,webp,avif",
-            },
-        )
-        if not result.get("ok"):
-            raise RuntimeError(f"评论接口请求失败：HTTP {result.get('status')}")
-        body = result.get("body")
-        items = xhs_api_items(body)
-        if not items:
-            raise RuntimeError("评论接口没有返回评论列表")
-        for index, item in enumerate(items):
-            comment = comment_from_api(item, f"{note_id}-comment-{rounds}-{index}")
-            sub_comments = item.get("sub_comments")
-            if isinstance(sub_comments, list):
-                for reply_index, reply_item in enumerate(sub_comments[:max_replies_per_comment]):
-                    if isinstance(reply_item, dict):
-                        reply = comment_from_api(reply_item, f"{comment.comment_id}-inline-{reply_index}")
-                        if reply.content:
-                            comment.replies.append(reply)
-            if comment.content and comment.comment_id not in comments_by_id:
-                comments_by_id[comment.comment_id] = comment
-            if len(comments_by_id) >= target:
-                break
-        cursor, has_more = xhs_api_cursor(body)
-        print(f"  [API评论] 扫描第 {rounds} 轮，主评论 {len(comments_by_id)}/{target}", flush=True)
-        if not has_more or not cursor:
-            break
-        await human_pause(0.5, 1.0)
-
-    hot_comments = sorted(comments_by_id.values(), key=lambda c: c.like_count, reverse=True)[:hot_comment_count]
-    for comment in hot_comments:
-        if len(comment.replies) < max_replies_per_comment:
-            extras = await fetch_api_replies(
-                page,
-                note_id,
-                comment.comment_id,
-                max_replies_per_comment - len(comment.replies),
-            )
-            seen = {reply.comment_id for reply in comment.replies}
-            comment.replies.extend([reply for reply in extras if reply.comment_id not in seen])
-    return hot_comments
-
-
-async def scrape_open_post(page: Page, post: Post, keyword: str, hot_comment_count: int, max_replies_per_comment: int) -> Post:
+async def scrape_open_post(page: Page, post: Post, hot_comment_count: int, max_replies_per_comment: int) -> Post:
     main = page.locator(
         ".note-content, .note-detail, [class*='note-content'], [class*='note-detail'], [class*='interaction-container']"
     ).first
@@ -830,21 +717,26 @@ async def scrape_open_post(page: Page, post: Post, keyword: str, hot_comment_cou
     ])
     author = await first_text(root, [".author .name", ".username", ".user-name", "[class*='user'] [class*='name']"])
     comment_count = await first_text(page.locator("body"), [".comments-title", "[class*='comment-count']"])
-    if title and keyword_matches(f"{title}\n{note_text}", keyword):
+    detail_text = f"{title}\n{note_text}"
+    if title:
         post.title = title
     if author:
         post.author = author
     post.comment_count_text = comment_count
-    detail_text = f"{title}\n{note_text}"
-    if not keyword_matches(detail_text, keyword):
-        raise RuntimeError(f"详情页内容不包含关键词：{keyword}")
+    if not compact_preview(detail_text):
+        body_preview = ""
+        try:
+            body_preview = compact_preview(await page.locator("body").inner_text(timeout=2000))
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"详情页内容提取为空，可能未加载成功/被登录或安全验证拦截；"
+            f"url={page.url}；页面片段={body_preview or '空'}"
+        )
 
-    try:
-        comments = await scrape_comments_via_api(page, post.note_id, hot_comment_count, max_replies_per_comment)
-        print(f"  [API评论] 成功抓取主评论 {len(comments)} 条", flush=True)
-    except Exception as exc:
-        print(f"  [API评论] 失败，回退 GUI 抓取：{type(exc).__name__}: {exc}", flush=True)
-        comments = await scrape_comments(page, hot_comment_count, max_replies_per_comment)
+    comments = await scrape_comments(page, hot_comment_count, max_replies_per_comment)
+    if not comments:
+        print("  [评论] 未抓到评论，按真实 0 评论保存。", flush=True)
     reply_count = sum(len(comment.replies) for comment in comments)
     post.comments = comments
     post.comments_count = len(comments)
@@ -893,7 +785,18 @@ def save_output(
     output.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-async def run(keyword: str, limit: int, output: Path, profile_dir: Path, headless: bool, hot_comment_count: int, max_replies_per_comment: int, content_type: str, sort: str) -> None:
+async def run(
+    keyword: str,
+    limit: int,
+    output: Path,
+    profile_dir: Path,
+    headless: bool,
+    hot_comment_count: int,
+    max_replies_per_comment: int,
+    content_type: str,
+    sort: str,
+    candidate_limit: int | None = None,
+) -> None:
     cleanup_stale_chrome_locks(profile_dir)
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
@@ -905,49 +808,82 @@ async def run(keyword: str, limit: int, output: Path, profile_dir: Path, headles
         try:
             page = await context.new_page()
             await open_search(page, keyword, content_type, sort)
-            candidate_limit = candidate_limit_for(limit)
-            print(f"[搜索] 目标成功帖子 {limit} 个，将最多收集 {candidate_limit} 个候选用于失败补位", flush=True)
-            posts = await collect_posts(page, candidate_limit, keyword)
-            if not posts:
-                raise RuntimeError(
-                    "没有抓到帖子。可能是未登录、搜索页被安全验证限制，或当前筛选条件下没有结果。"
-                    "请先在可视化浏览器里确认页面能正常显示搜索结果。"
-                )
-
+            candidate_limit = max(limit, candidate_limit or candidate_limit_for(limit))
+            print(f"[搜索] 目标成功帖子 {limit} 个，将最多处理 {candidate_limit} 个候选用于失败补位", flush=True)
+            search_url = page.url
             scraped: list[Post] = []
             failed_posts: list[Post] = []
-            for index, post in enumerate(posts, start=1):
-                if len(scraped) >= limit:
+            seen_urls: set[str] = set()
+            filtered_count = 0
+            processed_candidates = 0
+            idle_rounds = 0
+
+            while len(scraped) < limit and processed_candidates < candidate_limit and idle_rounds < 12:
+                processed_this_round = 0
+                cards = page.locator("section.note-item, div.note-item, [class*='note-item']")
+                card_count = await cards.count()
+                for card_index in range(card_count):
+                    if len(scraped) >= limit or processed_candidates >= candidate_limit:
+                        break
+                    card = cards.nth(card_index)
+                    try:
+                        post = await post_from_card(card, processed_candidates + 1)
+                        if not post:
+                            filtered_count += 1
+                            continue
+                        if post.url in seen_urls:
+                            continue
+                        seen_urls.add(post.url)
+                        processed_candidates += 1
+                        processed_this_round += 1
+                        print(
+                            f"[{processed_candidates}/{candidate_limit}] 按平台顺序抓取帖子，"
+                            f"成功 {len(scraped)}/{limit}：{post.title} | {post.url}",
+                            flush=True,
+                        )
+                        try:
+                            await click_post_card(page, card, post)
+                            scraped_post = await scrape_open_post(
+                                page,
+                                post,
+                                hot_comment_count,
+                                max_replies_per_comment,
+                            )
+                            scraped.append(scraped_post)
+                            print(f"  [成功] 已完成帖子 {len(scraped)}/{limit}", flush=True)
+                        except Exception as exc:
+                            post.scrape_error = f"{type(exc).__name__}: {exc}"
+                            failed_posts.append(post)
+                            print(f"  跳过该帖子，原因：{post.scrape_error}", flush=True)
+                        finally:
+                            if scraped or failed_posts:
+                                save_output(
+                                    keyword,
+                                    output,
+                                    scraped,
+                                    hot_comment_count,
+                                    max_replies_per_comment,
+                                    content_type,
+                                    sort,
+                                    requested_posts=limit,
+                                    failed_posts=failed_posts,
+                                )
+                            await close_open_post(page, search_url, keyword, content_type, sort)
+                            await human_pause(1.5, 3.0)
+                    except Exception:
+                        continue
+
+                if len(scraped) >= limit or processed_candidates >= candidate_limit:
                     break
-                print(f"[{index}/{len(posts)}] 抓取候选，成功 {len(scraped)}/{limit}：{post.title} | {post.url}")
-                try:
-                    await open_post_from_search(page, post)
-                    scraped_post = await scrape_open_post(page, post, keyword, hot_comment_count, max_replies_per_comment)
-                    scraped.append(scraped_post)
-                    print(f"  [成功] 已完成帖子 {len(scraped)}/{limit}", flush=True)
-                except Exception as exc:
-                    post.scrape_error = f"{type(exc).__name__}: {exc}"
-                    failed_posts.append(post)
-                    print(f"  跳过该帖子，原因：{post.scrape_error}")
-                if scraped or failed_posts:
-                    save_output(
-                        keyword,
-                        output,
-                        scraped,
-                        hot_comment_count,
-                        max_replies_per_comment,
-                        content_type,
-                        sort,
-                        requested_posts=limit,
-                        failed_posts=failed_posts,
-                    )
-                try:
-                    await page.go_back(wait_until="domcontentloaded", timeout=10000)
-                    await wait_for_optional_network_idle(page, timeout=5000)
-                    await human_pause(0.8, 1.5)
-                except Exception:
-                    await open_search(page, keyword, content_type, sort)
-                await human_pause(2.0, 4.0)
+                idle_rounds = idle_rounds + 1 if processed_this_round == 0 else 0
+                await page.mouse.wheel(0, 1800)
+                await human_pause(1.2, 2.4)
+
+            print(
+                f"[搜索] 已按平台顺序处理候选 {processed_candidates} 个，跳过无链接卡片约 {filtered_count} 个，"
+                f"成功 {len(scraped)}/{limit}，失败 {len(failed_posts)}",
+                flush=True,
+            )
 
             if not scraped:
                 raise RuntimeError("帖子详情均未成功抓取，未生成有效评论结果。")
@@ -977,6 +913,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="抓取小红书关键词搜索结果前 N 个帖子评论并保存为 JSON。")
     parser.add_argument("--keyword", default="首尔病", help="搜索关键词")
     parser.add_argument("--limit", type=int, default=10, help="抓取帖子数量")
+    parser.add_argument("--candidate-limit", type=int, default=None, help="最大候选帖子数量；不填则按目标成功数自动补位")
     parser.add_argument("--output", type=Path, default=Path("xhs_comments.json"), help="输出 JSON 文件")
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_PROFILE_DIR, help="浏览器登录态目录")
     parser.add_argument("--hot-comment-count", type=int, default=20, help="每个帖子抓取的热门主评论数量")
@@ -997,7 +934,20 @@ def main() -> None:
     if args.login:
         asyncio.run(login(args.profile_dir, args.auto_login, args.login_timeout))
     else:
-        asyncio.run(run(args.keyword, args.limit, args.output, args.profile_dir, args.headless, args.hot_comment_count, args.max_replies_per_comment, args.content_type, args.sort))
+        asyncio.run(
+            run(
+                args.keyword,
+                args.limit,
+                args.output,
+                args.profile_dir,
+                args.headless,
+                args.hot_comment_count,
+                args.max_replies_per_comment,
+                args.content_type,
+                args.sort,
+                args.candidate_limit,
+            )
+        )
 
 
 if __name__ == "__main__":

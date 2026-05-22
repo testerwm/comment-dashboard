@@ -67,8 +67,12 @@
             </div>
             <div class="grid two xhs-only hidden">
               <label>
-                帖子数量
+                目标成功帖子数
                 <input name="limit" type="number" min="1" max="50" value="10" />
+              </label>
+              <label>
+                最大候选帖子数
+                <input name="xhsCandidateLimit" type="number" min="1" max="300" placeholder="留空则自动补位" />
               </label>
             </div>
             <details class="filter-box">
@@ -227,7 +231,7 @@
           </div>
           <div class="panel wide">
             <div class="panel-title">
-              <h2>互动排行</h2>
+              <h2>评论量排行</h2>
               <span>按抓取到的评论与回复排序</span>
             </div>
             <div id="itemsChart" class="bar-chart"></div>

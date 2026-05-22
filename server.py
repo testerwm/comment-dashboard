@@ -442,8 +442,9 @@ class Handler(BaseHTTPRequestHandler):
                     script = Path(body.get("scriptPath") or DEFAULT_XHS_SCRIPT).expanduser()
                     profile_dir = Path(body.get("profileDir") or DEFAULT_XHS_PROFILE).expanduser()
                     preflight_logs = prepare_profile_for_crawl(profile_dir)
-                    hot_comment_count = max(1, min(int(body.get("commentCount") or 20), 20))
+                    hot_comment_count = max(1, min(int(body.get("commentCount") or 20), 200))
                     max_replies = max(0, min(int(body.get("maxRepliesPerComment") or 10), 50))
+                    candidate_limit = body.get("xhsCandidateLimit")
                     command = [
                         python_for_script(script),
                         str(script),
@@ -464,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
                         "--profile-dir",
                         str(profile_dir),
                     ]
+                    if candidate_limit:
+                        command.extend(["--candidate-limit", str(max(1, min(int(candidate_limit), 300)))])
                     if body.get("headless"):
                         command.append("--headless")
                     job = start_job("xhs", command, script.parent, output)

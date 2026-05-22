@@ -501,7 +501,7 @@ summary {
 .item-row {
   width: 100%;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 64px;
+  grid-template-columns: 42px minmax(0, 1fr) minmax(156px, auto);
   gap: 10px;
   align-items: center;
   text-align: left;
@@ -522,6 +522,37 @@ summary {
 .item-count {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+.item-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(42px, 1fr));
+  gap: 6px;
+  align-items: stretch;
+  font-variant-numeric: tabular-nums;
+}
+
+.item-metrics span {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 6px 5px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.item-metrics strong {
+  color: var(--ink);
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.item-metrics em {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-style: normal;
+  line-height: 1;
 }
 
 .item-main {

@@ -278,8 +278,8 @@ function renderBars(target, rows, color = "var(--accent-3)") {
   `).join("") : "<p class='schema-info'>暂无可展示数据</p>";
 }
 
-function itemScore(item) {
-  return item.comments.length || item.commentDeclared || item.likes || item.play || 0;
+function itemCommentTotal(item) {
+  return (item.rootCommentCount || 0) + (item.replyCount || 0);
 }
 
 function itemTypeLabel(platform) {
@@ -302,9 +302,13 @@ function renderItemList() {
         <span class="item-rank">#${escapeHtml(item.rank || "")}</span>
         <span class="item-main">
           <strong>${escapeHtml(item.title || "未命名")}</strong>
-          <small>${escapeHtml(item.author || "未知作者")} · 主评论 ${formatNumber(item.rootCommentCount || 0)} · 回复 ${formatNumber(item.replyCount || 0)}</small>
+          <small>${escapeHtml(item.author || "未知作者")}</small>
         </span>
-        <span class="item-count">${formatNumber(itemScore(item))}</span>
+        <span class="item-metrics" aria-label="帖子指标">
+          <span><strong>${formatNumber(item.rootCommentCount || 0)}</strong><em>主评</em></span>
+          <span><strong>${formatNumber(item.replyCount || 0)}</strong><em>回复</em></span>
+          <span><strong>${formatNumber(item.likes || 0)}</strong><em>赞</em></span>
+        </span>
       </button>
     `;
   }).join("") || "<p class='schema-info'>暂无帖子/视频数据</p>";
@@ -387,7 +391,7 @@ function renderDashboard() {
   `;
 
   const itemRows = [...data.items]
-    .map((item) => ({ label: item.title, value: itemScore(item) }))
+    .map((item) => ({ label: item.title, value: itemCommentTotal(item) }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 12);
   renderBars($("#itemsChart"), itemRows, "var(--accent-3)");
@@ -628,6 +632,7 @@ function formPayload(form) {
     biliDuration: Number(fd.get("biliDuration") || 0),
     xhsContentType: fd.get("xhsContentType") || "all",
     xhsSort: fd.get("xhsSort") || "general",
+    xhsCandidateLimit: fd.get("xhsCandidateLimit") ? Number(fd.get("xhsCandidateLimit")) : null,
     commentCount: Number(fd.get("commentCount") || 20),
     maxRepliesPerComment: Number(fd.get("maxRepliesPerComment") || 200),
     limit: Number(fd.get("limit") || 10),
